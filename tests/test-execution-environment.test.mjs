@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -247,6 +248,7 @@ test('host placement refuses to run inside the test image', () => {
       testEnvScript.replaceAll('/etc/openkit-test-env', fixtureIdentity),
       { mode: 0o755 }
     );
+    copyRetrievalBuildInputs(fixtureRoot);
     writeFileSync(fixtureIdentity, 'identity\n');
     const result = spawnSync('bash', [fixtureScript, 'host', 'printf', 'HOST_INSIDE_IMAGE'], {
       cwd: fixtureRoot,
@@ -311,6 +313,7 @@ test('inside-image placement rejects a stale build-input digest before running t
     ]) {
       writeFileSync(join(fixtureRoot, relativePath), read(relativePath));
     }
+    copyRetrievalBuildInputs(fixtureRoot);
     writeFileSync(fixtureIdentity, 'sha256:stale\n');
     writeFileSync(`${fixtureIdentity}-build-input-digest`, 'sha256:stale\n');
 
@@ -516,6 +519,7 @@ test('test image content tag changes with every manifest-selected build input', 
       mkdirSync(join(fixtureRoot, directory), { recursive: true });
     }
     writeFileSync(tagScript, read('scripts/docker/test-image-tag.mjs'));
+    copyRetrievalBuildInputs(fixtureRoot);
     writeFileSync(fixtureImageManifest, JSON.stringify(fixtureManifest));
     writeFileSync(join(fixtureRoot, 'containers/test-env/Dockerfile'), testImageDockerfile);
     writeFileSync(
@@ -623,6 +627,7 @@ function prepareInImageFixture(digestFileContents) {
   ]) {
     writeFileSync(join(fixtureRoot, relativePath), read(relativePath));
   }
+  copyRetrievalBuildInputs(fixtureRoot);
   writeFileSync(fixtureIdentity, 'identity\n');
   const digest =
     digestFileContents ??
@@ -789,3 +794,15 @@ test('gates that compile or import a workspace package build its dependencies fi
     Object.fromEntries(Object.keys(exercisedPackages).map((scriptName) => [scriptName, []]))
   );
 });
+
+/** Supply the existing dictionary build inputs without decoding or changing the vendored archive. */
+function copyRetrievalBuildInputs(fixtureRoot) {
+  for (const file of [
+    'scripts/retrieval-dictionary.py',
+    'apps/retrieval-kernel/vendor/mecab-ipadic-2.7.0-20250920.tar.gz',
+    'apps/retrieval-kernel/vendor/IPADIC-COPYING',
+  ]) {
+    mkdirSync(dirname(join(fixtureRoot, file)), { recursive: true });
+    copyFileSync(join(repoRoot, file), join(fixtureRoot, file));
+  }
+}
