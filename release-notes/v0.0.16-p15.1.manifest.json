@@ -1,0 +1,8 @@
+{
+  "previousAppImageId": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "migrationFree": true,
+  "configurationCompatible": true,
+  "retainedDataCompatible": true,
+  "recovery": "previous-image-compatible",
+  "provenance": "p15-synthetic-fixture-no-host-data"
+}
