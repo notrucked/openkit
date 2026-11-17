@@ -1,0 +1,26 @@
+/** Scratch-only read-only inventory. No register, decisions, or publication effects. */
+import {readFileSync,mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {checkImages} from './check-security.mjs';
+import {observeIndex,indexPlatforms} from './release-security.mjs';
+const id=process.env.IMAGE_ID;
+if(!['app','worker-common','worker-runtimes'].includes(id)||process.env.GITHUB_REPOSITORY!=='notrucked/openkit'||process.env.GITHUB_REF!=='refs/heads/scratch/sec-inventory/8b74adb84f173cad8f5048fee3af7f894f15be95')throw Error('Scratch inventory scope refused');
+if(process.env.OPENKIT_SECURITY_FINDINGS)throw Error('Register input prohibited');
+const record=JSON.parse(readFileSync(join('scratch-security-inputs',id+'.json'),'utf8'));
+if(record.sha!=='c974b16a88c443655c22a3606535a7fc99192c9f'||record.repository!=='notrucked/openkit'||record.tag!=='v0.0.0-rc9-reset.20261116.12'||record.id!==id||record.provenance.runId!==43993876781||record.provenance.attempt!==1)throw Error('Exact scratch candidate required');
+const startedAt=new Date().toISOString();
+const manifests=indexPlatforms(observeIndex(record.image,record.digest),['linux/amd64','linux/arm64']);
+for(const m of manifests)if(!record.platforms.some(p=>p.platform===m.platform&&p.digest===m.digest))throw Error('Candidate platform digest differs');
+let findings=[];
+const log=console.log;console.log=()=>{};
+try{
+ for(const m of manifests){
+  const found=await checkImages({images:[{platform:m.platform,image:record.image+'@'+m.digest}]});
+  findings.push(...found.filter(f=>f.knownExploited||['K','C'].includes(f.class)));
+ }
+}finally{console.log=log;}
+const allowed=['id','artifact','component','advisoryIds','class','knownExploited','fixAvailable'];
+for(const f of findings)if(Object.keys(f).some(k=>!allowed.includes(k)))throw Error('Unexpected projection field');
+mkdirSync('scratch-security-inventory',{recursive:true});
+writeFileSync(join('scratch-security-inventory',id+'.json.inventory.json'),JSON.stringify({schemaVersion:1,repository:record.repository,run:record.provenance,sha:record.sha,tag:record.tag,imageId:record.id,image:record.image,indexDigest:record.digest,platforms:manifests,scanner:'osv-scanner 2.7.1',startedAt,completedAt:new Date().toISOString(),findings},null,2)+'\n',{mode:0o600});
+console.log('Structured inventory retained as an artifact; no finding projections printed, no release admission attempted.');
