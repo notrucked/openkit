@@ -14,10 +14,9 @@ for(const m of manifests)if(!record.platforms.some(p=>p.platform===m.platform&&p
 let findings=[];
 const log=console.log;console.log=()=>{};
 try{
- for(const m of manifests){
-  const found=await checkImages({images:[{platform:m.platform,image:record.image+'@'+m.digest}]});
-  findings.push(...found.filter(f=>f.knownExploited||['K','C'].includes(f.class)));
- }
+ // Keep one KEV observation across both exact platform scans.
+ const found=await checkImages({images:manifests.map(m=>({platform:m.platform,image:record.image+'@'+m.digest}))});
+ findings.push(...found.filter(f=>f.knownExploited||['K','C'].includes(f.class)));
 }finally{console.log=log;}
 const allowed=['id','artifact','component','advisoryIds','class','knownExploited','fixAvailable'];
 for(const f of findings)if(Object.keys(f).some(k=>!allowed.includes(k)))throw Error('Unexpected projection field');
