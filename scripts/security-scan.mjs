@@ -135,6 +135,7 @@ export function runOsv(args, { cwd, env }) {
     version.stdout.split('\n')[0].trim() !== `osv-scanner version: ${pins['osv-scanner'].version}`
   )
     throw Error('Pinned OSV scanner is required');
+  const scanStarted = performance.now();
   const scanned = spawnSync('osv-scanner', args, {
     cwd,
     env,
@@ -142,6 +143,14 @@ export function runOsv(args, { cwd, env }) {
     timeout: 180000,
     maxBuffer: 64 * 1024 * 1024,
   });
+  process.stderr.write(
+    `${JSON.stringify({
+      status: Number.isInteger(scanned.status) ? scanned.status : null,
+      signal: scanned.signal ?? null,
+      errorCode: /^[A-Z0-9_]+$/u.test(scanned.error?.code ?? '') ? scanned.error.code : null,
+      durationMs: Math.round(performance.now() - scanStarted),
+    })}\n`
+  );
   if (scanned.error || ![0, 1].includes(scanned.status))
     throw Error('Security scan could not complete');
   const report = JSON.parse(scanned.stdout);
@@ -198,3 +207,4 @@ export function newSevereFindings(before, after) {
   const existing = new Set(before.filter(severe).map(key));
   return after.filter((finding) => severe(finding) && !existing.has(key(finding)));
 }
+
