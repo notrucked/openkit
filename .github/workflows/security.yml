@@ -1,50 +1,100 @@
-name: Published image security diagnostics
+name: Scratch structured security inventory
 
 on:
-  schedule:
-    - cron: '37 3 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: read
 
-concurrency:
-  group: openkit-published-security-diagnostic
-  cancel-in-progress: false
-
 jobs:
-  images:
-    name: Rescan latest published platform digests
+  inventory:
+    name: Inventory exact scratch candidate (${{ matrix.id }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        id: [app, worker-common, worker-runtimes]
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout isolated inventory branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - name: Set up pinned Node
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b
         with:
           cache: false
           install_args: node
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Read-only registry login
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Read-only package login with the job token
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
       - name: Install checksum-bound scanner
         run: |
           node scripts/install-security-tools.mjs --tool osv-scanner --directory "${RUNNER_TEMP}/security-tools"
           echo "${RUNNER_TEMP}/security-tools" >> "${GITHUB_PATH}"
-      - name: Diagnostic scan of the latest published immutable image digests
+      - name: Collect exact projections without printing findings or admitting publication
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/release-security.mjs --latest --diagnostic --repository "${GITHUB_REPOSITORY}" --repo-root .
+          IMAGE_ID: ${{ matrix.id }}
+        run: node scripts/scratch-security-inventory.mjs
+      - name: Retain scanner projections for one day
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: scratch12-security-inventory-${{ matrix.id }}-${{ github.run_attempt }}
+          path: scratch-security-inventory/${{ matrix.id }}.json.inventory.json
+          retention-days: 1
+
+  app-evidence:
+    name: Read exact rc.11 App notices and toolchain versions
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout isolated inventory inputs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout the exact production source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: lingkaix/openkit
+          ref: 2f075c8756bfad5154fc67b01a8dc24f2f826cae
+          path: production-source
+          persist-credentials: false
+      - name: Pull the exact App manifests anonymously and verify notices and toolchain
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/rc11-docker-anonymous
+          CARGO_HOME: ${{ runner.temp }}/rc11-cargo
+          CARGO_BUILD_JOBS: '1'
+          RUSTUP_TOOLCHAIN: '1.97.1'
+        run: |
+          set -euo pipefail
+          docker version
+          test "$(git -C production-source rev-parse HEAD)" = '2f075c8756bfad5154fc67b01a8dc24f2f826cae'
+          test "${GITHUB_REPOSITORY}" = notrucked/openkit
+          test "${GITHUB_REF}" = 'refs/heads/scratch/sec-inventory/2f075c8756bfad5154fc67b01a8dc24f2f826cae'
+          mkdir -m 700 "${DOCKER_CONFIG}" "${CARGO_HOME}" app-evidence
+          record=scratch-security-inputs/production-app.json
+          jq -e '.repository == "lingkaix/openkit" and .image == "ghcr.io/lingkaix/openkit-app" and .id == "app" and .tag == "v0.1.0-rc.11" and .sha == "2f075c8756bfad5154fc67b01a8dc24f2f826cae" and .provenance.runId == 44459907400 and .provenance.attempt == 1 and (.platforms|length) == 2' "${record}" >/dev/null
+          amd64=$(jq -er '.platforms[] | select(.platform == "linux/amd64") | .digest | select(test("^sha256:[a-f0-9]{64}$"))' "${record}")
+          arm64=$(jq -er '.platforms[] | select(.platform == "linux/arm64") | .digest | select(test("^sha256:[a-f0-9]{64}$"))' "${record}")
+          amd64_ref=ghcr.io/lingkaix/openkit-app@${amd64}
+          arm64_ref=ghcr.io/lingkaix/openkit-app@${arm64}
+          docker pull --platform linux/amd64 "${amd64_ref}"
+          docker pull --platform linux/arm64 "${arm64_ref}"
+          rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal
+          cargo fetch --locked --manifest-path production-source/packages/retrieval-kernel/Cargo.toml
+          python3 production-source/packages/retrieval-kernel/verify-image-notices.py --amd64-image "${amd64_ref}" --arm64-image "${arm64_ref}" > app-evidence/notices.json
+          python3 scripts/scratch-rc11-app-toolchain.py "${amd64_ref}" "${arm64_ref}" > app-evidence/toolchain.json
+      - name: Retain passing proof for the two exact App manifests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: rc11-app-evidence-${{ github.run_attempt }}
+          path: app-evidence/
+          retention-days: 1
