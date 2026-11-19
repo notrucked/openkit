@@ -1,0 +1,8 @@
+{
+  "previousAppImageId": "sha256:7a7075b5e6b1bab6eea140e25f2543ab1e453dfa7ff92fbf471c665665b92f3d",
+  "migrationFree": true,
+  "configurationCompatible": true,
+  "retainedDataCompatible": true,
+  "recovery": "previous-image-compatible",
+  "provenance": "rc12-scratch-migration-free-assessment"
+}
