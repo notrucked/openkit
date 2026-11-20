@@ -3,7 +3,7 @@ status: Accepted
 ---
 # Using OpenKit
 
-Use Web for ordinary conversation, delegated work, human decisions and outputs. An external Agent uses remote MCP `openkit_guide`, `openkit_search`, `openkit_describe` and `openkit_call` to discover and invoke supported operations; administrators can use this operations package's CLI. Both operate the same durable product records and current user authority.
+Use Web for ordinary conversation, delegated work, human decisions and outputs. Use a listed native tool, or search operations and invoke the unpromoted id through `openkit_read` or `openkit_call` according to its mutation posture; describe supplies the exact fallback contract. Administrators can use this operations package's CLI. Both operate the same durable product records and current user authority.
 
 Select the intended Workspace and inspect the data sources selected for the task, Agent and model before a source task. Quick conversation is for short assistance; use a Worker task for bounded execution and Goal Mode for planned work requiring coordination. In the current Web composer, the Worker target may be presented as **New Shard + Worker**, which creates a linked execution Thread. Follow that receiving Thread rather than treating submission as completion.
 
@@ -159,6 +159,8 @@ Discover `knowledge.notebook.history`, `knowledge.notebook.diff` and `knowledge.
 Present knowledge proposals and conflicts to the user with their evidence and scope. Resolve or promote them only through an exposed operation and explicit user direction when that decision changes shared knowledge.
 
 Read `knowledge.proposal.read` before accepting a saved Proposal. First read its changed paths, then request each path and follow `nextOffset` until it is null. Offsets count Unicode code points. Retain the returned Proposal digest, base and candidate commits for the human decision. Every part must match that tuple; a stale or unavailable preview needs inspection before another decision. Web presents the same complete diff before enabling acceptance.
+
+Read `openkit_status` in each Page's complete candidate Markdown before Review. To activate an already-published draft, select Active in the existing fixed-base Page editor and complete any required Review.
 
 A retrieved page is not automatically a sufficient answer. `knowledge.ask` runs the configured Knowledge Manager model with governed retrieval and page reads. It returns scope-qualified citations and uncertainty, with its own Thread, Turn and usage. Workspace work may also read Server Knowledge when the current Server owner admits the actor. User Memory does not enter shared work. The existing `knowledge.answer` operation uses the same agent path.
 
