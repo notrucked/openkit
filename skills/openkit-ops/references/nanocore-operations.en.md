@@ -81,6 +81,12 @@ If a known validation defect prevents the current image from reopening retained 
 
 When the deployment has the restricted App-update helper installed, use Web Settings → App update or the bundled administrator CLI. Search for `app-update` and describe `app-update.preflight`, `app-update.prepare`, `app-update.start` and `app-update.status` before invoking them. The helper supports published releases only. The caller sends the published `{tag, sourceCommit, appDigest}` of the target release and `expectedCurrentImageId`. Prepare pins them in a receipt and returns it for review. It does not build or interrupt the App. Save its request ID before starting. Start requires consent to that exact prepared update and its maintenance interruption. Read status with the same ID after a disconnect or App restart; never create a second start to resolve an unknown handoff.
 
+Review the prepared receipt and authorize the interruption before you run the same start command for either Docker layout.
+
+```bash
+printf '%s' '{"requestId":"<saved UUID>","maintenanceConsent":true}' | openkit ops call app-update.start --input -
+```
+
 An administrator who reaches the deployment only through its web address reads the running release from authenticated App Diagnostics. Matching uses the running image ID or a repository digest actually associated with the running image. For a deployment created from that release's tag or image index, use the published App image index digest as `expectedCurrentImageId`. That digest is the release's `appDigest` and the App `Digest` line in its release notes. The built-in update installs that digest. A local installation runs a local image tag, and a restore runs a version tag. A deployment created from a platform manifest needs that platform digest instead. When the installation reference is not known, an authorized operator inspects the running image rather than guessing from the release tag. A deployment on a release that does not report its identity needs the operator to know the running release. [App Image Release Identity](https://github.com/lingkaix/openkit/blob/main/docs/decisions/20261013-app_image_release_identity.md) records why Diagnostics reports that identity.
 
 Before prepare, call `app-update.preflight` with `{}`. It returns only an observation time, a Workspace count and counts of running Turns, pending Turns, queued admissions, open attempts, closing attempts and in-flight commands. It includes private work without exposing identifiers, titles, prompts or transcripts. Counts overlap; do not add them into a distinct-work total. Proceed only when its state is `idle` and every count is zero. Idle retained bindings and denied admissions do not count. Future scheduled work is outside this instantaneous observation.
@@ -142,7 +148,7 @@ sudo sha256sum /usr/local/lib/openkit/app-update-helper.py
 ```
 
 5. Preserve `helper.json`, secrets, receipt files and the lock configuration. Helper replacement does not change the deployment or its compatibility assessment.
-6. Read a saved receipt through the restricted entry with `{"op":"status","requestId":"<saved UUID>"}` on stdin. Match `helperSha256` to the installed checksum. If no receipt exists, use a fresh UUID for this read; `app_update_unavailable` reports the missing receipt and still returns the helper checksum. This error is not an update result.
+6. Read a saved receipt through the restricted entry with `{"op":"status","requestId":"<saved UUID>"}` on stdin. Match `helperSha256` to the installed checksum. If no receipt exists, use a fresh UUID for this read; `app_update_not_found` reports an absent receipt in a readable store and still returns the helper checksum.
 7. Run the content-free preflight and prepare only after the helper identity and update prerequisites are established.
 
 ### Restricted Host Helper
@@ -150,6 +156,8 @@ sudo sha256sum /usr/local/lib/openkit/app-update-helper.py
 The optional helper is a host-installed Python program, outside the App container. Install the reviewed `scripts/docker/app-update-helper.py` from the target release archive, or its exact source revision, as a root-owned mode-0755 regular file at `/usr/local/lib/openkit/app-update-helper.py`; retain its checksum. Its default configuration is the root-owned mode-0600 `/etc/openkit/app-update/helper.json`. Keep receipts and lock outside Data Root under a protected host directory. Configure the exact existing container, mounted paths, source repository for release-tag attribution, image repository, App URL and a protected valid administrator-token file. The compatibility assessment binds the observed current image, applied migrations and exact candidate; the initial procedure admits only established migration-free replacements, not arbitrary rollback compatibility.
 
 The existing App container must satisfy the deployment-binding checks, including a `json-file` log driver with `max-size` and `max-file`. Before the first helper update, the operator recreates a refused container with the same image. The operator keeps every other deployment setting that the binding checks already accept. The operator corrects the binding that the refusal names. For log retention, the operator selects the `json-file` driver with `max-size` and `max-file`. The operator uses the existing operator authorization for that recreation. Prepare applies the binding checks before it writes a receipt. Apply repeats those checks before it stops the App. When the log driver is not `json-file`, the refusal names that driver. When `max-size` or `max-file` is absent, the refusal names the missing option. When prepare refuses, it writes no receipt and leaves the App unchanged.
+
+The host-network layout uses `--network host` with no Docker port publications. For a host-local App origin, set `OPENKIT_BIND_HOST=127.0.0.1` and set `bind 127.0.0.1` in the mounted Caddyfile. Set the Caddy port to the existing App port. For a native NanoHost TLS listener, set `OPENKIT_TLS_CERT_FILE` and `OPENKIT_TLS_KEY_FILE` to protected files within an existing permitted bind, such as a restricted subdirectory of `/data/openkit.backups`.
 
 If the existing App mounts a repository directory read/write at `/srv/repos`, that mount and the optional protected helper field `repositoryDirectory` are legacy host-repository configuration retiring with the Workspace host repository resource. Do not add that mount or field for new work. Declaring `repositoryDirectory` for an already mounted directory only preserves that existing mount; it does not create a repository or authorize a new bind. Missing, undeclared or mismatched mounts fail before stopping the App. After rebuilding a server, verify the configured `adminTokenFile` still authenticates against that server; an old credential is not made valid by restoring its file. Refresh it only through the authorized credential procedure, without printing it or changing its scope.
 
@@ -159,7 +167,7 @@ The product helper has no source staging or build mode. Before a release pull, i
 
 If the App is unavailable, an authorized host operator can read the same receipt without starting another update: pass `{"op":"status","requestId":"<saved UUID>"}` on standard input to the installed helper. Inspect the corresponding `openkit-app-update-<UUID>` systemd unit and protected receipt/log files for missing evidence. Preserve unknown, interrupted and recovery-required outcomes. Before any manual restoration, prove the candidate stopped and the Data Root has no other writer; an old image cannot undo database changes.
 
-Receipt inspection still validates protected deployment configuration and the receipt location, but it does not require a current compatibility assessment. A retained commit-only receipt returns `app_update_recovery_required` for its saved ID. A valid retained release receipt remains readable when the assessment is stale, missing, or malformed. Inspect the known ID; neither a readable receipt nor a recovery-required result authorizes another start.
+Receipt inspection still validates protected deployment configuration and the receipt location, but it does not require a current compatibility assessment. A retained commit-only receipt returns `app_update_recovery_required` for its saved ID. If status reports `app_update_not_found` for an ID you saved, inspect the host's receipt and job evidence for that request. NanoCore reports recovery required for a missing receipt when an existing successful start handoff identifies the ID. A valid retained release receipt remains readable when the assessment is stale, missing, or malformed. Inspect the known ID; neither a readable receipt nor a recovery-required result authorizes another start.
 
 Prepare, start, and the supervised apply job still require the exact compatibility assessment. Before any of these operations, re-author a pre-removal assessment for the release candidate under the existing operator procedure. Establish the current image, published release source, and applied migrations. A status read supplies no migration, replacement, or restoration approval.
 
@@ -168,6 +176,30 @@ If the helper exits without a result envelope, the public result remains `app_up
 Container replacement replays only environment entries that differ from the old image defaults, or have no old default. The candidate image supplies its new defaults. An explicit setting equal to an old default is indistinguishable from that default and follows the image. Inspect the candidate's relevant defaults before consenting; environment values never enter receipts.
 
 The helper's retained-auth observation compares nonempty persistent token metadata through the existing administrator endpoint, ignoring last-use fields. It does not establish private Workspace continuity. Use a separately authorized Workspace credential to verify the relevant retained product records after replacement.
+
+The readiness check compares the candidate with the previous running App. An existing Gateway block can remain during the update and stays visible in authenticated diagnostics. A new readiness block, a newly failed subsystem, a critical failure, or missing or malformed readiness evidence fails verification.
+
+#### Getting Started Bridge Settings
+
+For the co-located [published installation](getting-started.en.md#configure-and-start-the-published-app), keep the original Docker bridge, persistent Data Root, enrollment sink, and read-only App-secret directory. Bind the protected host directory `<dataRoot>.backups` to `/data/openkit.backups` so backups survive App replacement. Keep both publications on `127.0.0.1`. Publish Caddy's container port `8080` to the existing App port. Keep the native NanoHost TCP port the same on the host and container. The Vault key and native TLS files remain in `/run/openkit-secrets`, and the credential slots remain in `/run/openkit-enrollment`.
+
+In schema version 1 of `helper.json`, set `appSecretsDirectory` to the absolute host source of `/run/openkit-secrets` and `nanohostCredentialsDir` to the absolute host source of `/run/openkit-enrollment`. Set `appBaseUrl` to the direct origin of the published Caddy port, such as `http://127.0.0.1:18080`. Supply the existing absolute `vaultKeyFile` on the host and the image paths `/srv/web` and `/etc/caddy/Caddyfile` for `webAssetsDir` and `caddyfile`. The verified App image supplies Web and Caddy for this layout. Leave `repositoryDirectory` unset.
+
+On a fresh installation, add the two restricted SSH binds before the image reference in the Getting Started `docker run` command. Set `OPENKIT_UPDATE_IDENTITY_FILE` and `OPENKIT_UPDATE_KNOWN_HOSTS_FILE` to the absolute host paths from the restricted SSH setup.
+
+```bash
+--mount "type=bind,src=$OPENKIT_UPDATE_IDENTITY_FILE,dst=/run/openkit/app-update/id_ed25519,readonly" \
+--mount "type=bind,src=$OPENKIT_UPDATE_KNOWN_HOSTS_FILE,dst=/run/openkit/app-update/known_hosts,readonly" \
+```
+
+For a running v0.1.0 installation with the original three binds, install the reviewed helper and complete the restricted SSH configuration. Keep the existing container and its writable layer. Use the same two absolute host paths and an authorized idle maintenance window. Leave `<dataRoot>.backups` absent so the conversion can create it exclusively. Run the conversion from the host under separate operator authorization.
+
+```bash
+sudo /usr/local/lib/openkit/app-update-helper.py --convert-getting-started \
+  "$OPENKIT_UPDATE_IDENTITY_FILE" "$OPENKIT_UPDATE_KNOWN_HOSTS_FILE"
+```
+
+The command recreates the App from its current image with the new backup and SSH mounts and bounded logs. It copies the existing backups out of the stopped original container with ownership and permissions preserved. It verifies the sealed backups against their manifests and checks that the replacement becomes healthy. It retains the stopped original container for recovery. After a successful conversion, use the ordinary App-update prepare and start operations. If conversion fails, it checks the recorded original container and confirms its health before reporting recovery. If it reports that restoration is unconfirmed, inspect the retained containers and backup directory before taking further action.
 
 ## Replace An Installed NanoHost Release
 
@@ -465,6 +497,14 @@ Expand a Goal in the conversation list to inspect its cards, linked Tasks and ev
 ## Inspect Server Knowledge maintenance
 
 Use `openkit ops describe knowledge.server.tell` before supplying explicit Server information and Source references. Use `knowledge.server.maintain` for a bounded Server notebook run. Both require current Server administration authority and accept no Workspace selector. The Server notebook learns from explicit requests and its human notebook edits, never from Workspace or User Threads.
+
+A fresh installation has no published Server notebook. When a Worker or Assistant turn is admitted to Server Knowledge, its scope overview still delivers the Workspace index and adds a Server entry of only `{ "scope": "server", "unavailable": true }`. That entry has no reason, path, digest or content. Workspace `knowledge.ask` can still answer from the Workspace notebook with Workspace citations. When the current credential is not admitted to Server Knowledge, the overview omits the Server scope. Omission is not the unavailable notice.
+
+The model-facing unavailable entry is the same when no Server index exists and when an authorized existing index cannot be delivered. Distinguish those cases from durable Server state, not from the overview text. Absence or a fresh uninitialized scope means `server/knowledge` is not in the Data Root, and there is no Server `knowledge.notebook.initialize` or `knowledge.source.register` audit. Do not publish a Server index, and do not call `knowledge.server.maintain` or `knowledge.server.tell`, merely to make the overview appear. `knowledge.server.maintain` initializes `server/knowledge` when that directory is absent. That is notebook creation, not a display repair.
+
+Failure to deliver an authorized existing index is different. If `server/knowledge` exists, or a Server `knowledge.notebook.initialize` or `knowledge.source.register` audit exists, but the published notebook cannot be read, `knowledge.server.maintain`, `knowledge.server.tell` and `knowledge.server.proposal.read` return `recovery_required` with the message "Notebook recovery required." When the notebook can be read but its published sources cannot, the source read returns `recovery_required` with the message "Server Source storage requires recovery." Overview preparation shows neither sentence. A published index that overview preparation refuses, including a missing page, a schema failure, or a restricted or confidential root, also becomes the same value-free unavailable entry. Inspect Server maintenance Turns with `thread.server.list` and `thread.server.read`, and read an exact candidate with `knowledge.server.proposal.read`. Do not treat the model notice as proof that the index is absent, and do not republish to hide `recovery_required`.
+
+Server overview content stays outside a portable Workspace export, including for an administrator. The value-free Server-unavailable notice can remain in that export. A Workspace-only overview remains portable.
 
 Use `thread.server.list`, `thread.server.read` and `turn.server.interrupt` to inspect or stop current Server work. Only Knowledge Manager work executes on these general Server Threads now. Inspect the native outcome. A required human Review uses `knowledge.server.proposal.read` and `knowledge.server.proposal.decide` on the exact candidate. Follow every preview cursor before accepting. A model cannot approve its candidate.
 

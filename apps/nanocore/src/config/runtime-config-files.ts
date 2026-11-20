@@ -66,8 +66,7 @@ import type { CoreDb } from '../storage/db.js';
 import { VaultBackendError } from '../vault/vault-backend.js';
 import { parseJsoncObject } from './jsonc.js';
 import {
-  diffRuntimeConfig,
-  loadRuntimeConfig,
+  NANO_HOST_TRANSPORT_RESTART_PATH,
   type RuntimeConfigManager,
   WORKSPACE_MATERIALIZATION_UNSUPPORTED_MESSAGE,
 } from './runtime-config.js';
@@ -76,6 +75,11 @@ import { unknownConfigKeyMessage, unknownConfigKeys } from './unknown-config-key
 const CONFIG_ROOT = 'config';
 const VALID_FILE_NAME = /^[A-Za-z0-9._-]+$/;
 const DATA_SOURCE_AUTHORITY_FIELDS = ['kind', 'access', 'sensitivity', 'vaultGrantRef'] as const;
+
+/** A current transport fence is independent of the authored candidate and its approval identity. */
+export function runtimeConfigCandidateRequiresRestart(plan: RuntimeConfigReloadPlan): boolean {
+  return plan.requiresRestart.some((entry) => entry.path !== NANO_HOST_TRANSPORT_RESTART_PATH);
+}
 
 /** Authority-bearing data source catalog change emitted after a successful file write. */
 export interface RuntimeConfigDataSourceAuthorityChange {
@@ -500,18 +504,20 @@ export class RuntimeConfigFileService {
         valid: false,
         diagnostics: singleFileDiagnostics,
         runtimeConfig: this.readRuntimeConfigStatus(),
-        plan: emptyValidationPlan(this.runtimeConfigManager.current().version),
+        plan: this.runtimeConfigManager.reportCurrentRestart(
+          emptyValidationPlan(this.runtimeConfigManager.current().version)
+        ),
       });
     }
 
     const tempRoot = this.createOverlayDataRoot(input);
 
     try {
-      const next = loadRuntimeConfig(tempRoot, {
-        version: this.runtimeConfigManager.current().version + 1,
-      });
-      const plan = diffRuntimeConfig(this.runtimeConfigManager.current(), next);
-      const runtimeDiagnostics = next.diagnostics.map((diagnostic) =>
+      const { snapshot, plan } = this.runtimeConfigManager.prepareReloadCandidate(
+        tempRoot,
+        input.mode
+      );
+      const runtimeDiagnostics = snapshot.diagnostics.map((diagnostic) =>
         runtimeDiagnosticToFileDiagnostic(diagnostic)
       );
       const diagnostics = [...singleFileDiagnostics];
@@ -532,7 +538,7 @@ export class RuntimeConfigFileService {
         valid: !hasBlockingDiagnostics(runtimeDiagnostics),
         diagnostics,
         runtimeConfig: this.readRuntimeConfigStatus(),
-        plan,
+        plan: this.runtimeConfigManager.reportCurrentRestart(plan),
       });
     } catch (error) {
       return RuntimeConfigValidationResponseSchema.parse({
@@ -550,7 +556,9 @@ export class RuntimeConfigFileService {
           },
         ],
         runtimeConfig: this.readRuntimeConfigStatus(),
-        plan: rejectedValidationPlan(this.runtimeConfigManager.current().version, error),
+        plan: this.runtimeConfigManager.reportCurrentRestart(
+          rejectedValidationPlan(this.runtimeConfigManager.current().version, error)
+        ),
       });
     } finally {
       removePrivateTreeSync(tempRoot);

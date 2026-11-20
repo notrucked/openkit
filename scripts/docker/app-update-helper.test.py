@@ -1141,7 +1141,7 @@ class RC6RegressionTests(unittest.TestCase):
             root = Path(tmp)
             path = write_config(root)
             _code, body = invoke(module, {"op": "status", "requestId": str(uuid.uuid4())}, path)
-            self.assertEqual(body["error"]["code"], "app_update_recovery_required")
+            self.assertEqual(body["error"]["code"], "app_update_not_found")
             self.assertEqual(body["helperSha256"], hashlib.sha256(HELPER_PATH.read_bytes()).hexdigest())
 
     def test_operations_archive_contains_reviewed_helper_covered_by_outer_checksum(self) -> None:
@@ -1418,7 +1418,7 @@ class ClosedStdinTests(unittest.TestCase):
 
 
 class ReceiptLifecycleTests(unittest.TestCase):
-    def test_start_and_status_missing_are_recovery_required_without_new_effects(self) -> None:
+    def test_missing_status_is_not_found_and_start_refuses_without_new_effects(self) -> None:
         module = load_helper()
         missing = "11111111-1111-4111-8111-111111111111"
         with tempfile.TemporaryDirectory(prefix="openkit-app-update-") as tmp:
@@ -1442,8 +1442,19 @@ class ReceiptLifecycleTests(unittest.TestCase):
             self.assertEqual(effects.http_calls, [])
             self.assertEqual(list((root / "receipts").iterdir()), [])
             self.assertEqual(start_body["error"]["code"], "app_update_recovery_required")
-            # Removed IDs retain the same recovery refusal; a status read cannot create a job.
-            self.assertEqual(status_body["error"]["code"], "app_update_recovery_required")
+            self.assertEqual(status_body["error"]["code"], "app_update_not_found")
+
+    def test_status_without_the_configured_receipt_directory_requires_recovery(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = write_config(root, receiptDir=str(root / "unavailable-receipts"))
+            effects = RecordingEffects()
+            _, body = invoke(module, {"op": "status", "requestId": str(uuid.uuid4())}, config, effects)
+            self.assertEqual(body["error"]["code"], "app_update_recovery_required")
+            self.assertFalse((root / "unavailable-receipts").exists())
+            self.assertEqual(effects.calls, [])
+            self.assertEqual(effects.http_calls, [])
 
     def test_expired_prepare_cannot_start_and_does_not_recreate_a_receipt(self) -> None:
         module = load_helper()
@@ -2921,6 +2932,36 @@ class OwnerAmendmentTests(unittest.TestCase):
             self.assertNotIn("blocks", body["candidateBoot"])
             self.assertTrue(any(call[:2] == ["docker", "stop"] for call in effects.calls))
 
+    def test_gateway_readiness_compares_each_block_with_the_previous_boot(self) -> None:
+        module = load_helper()
+        for before, after, candidate_state, expected in (
+            (["llm.inference"], ["llm.inference"], "degraded", "succeeded"),
+            (["llm.inference"], ["llm.inference", "llm.other"], "degraded", "failed"),
+            ([], ["llm.inference"], "degraded", "failed"),
+            (["llm.inference"], ["llm.inference"], "failed", "failed"),
+        ):
+            with self.subTest(before=before, after=after, state=candidate_state), tempfile.TemporaryDirectory() as tmp:
+                effects = RecordingEffects()
+                effects.boot_payload_before = typed_boot(
+                    PREVIOUS_BOOT_ID,
+                    llmGateway={
+                        "state": "degraded",
+                        "reasons": [boot_reason("llm.gateway_unavailable", "Previous observation.", before)],
+                    },
+                )
+                effects.boot_payload_after = typed_boot(
+                    CANDIDATE_BOOT_ID,
+                    llmGateway={
+                        "state": candidate_state,
+                        "reasons": [boot_reason("llm.gateway_unavailable", "Candidate observation.", after)],
+                    },
+                )
+                _config_path, effects, _prepared, body = _start_apply(module, Path(tmp), effects=effects)
+                self.assertEqual(body["stage"], expected, body)
+                self.assertEqual(body["predicates"]["noBlockingReadiness"], expected == "succeeded")
+                self.assertEqual(body["previousAppRestored"], expected == "failed")
+                self.assertIn("llm.gateway_unavailable", body["candidateBoot"]["blockingReasons"])
+
     def test_malformed_candidate_reasons_fail_closed(self) -> None:
         module = load_helper()
         with tempfile.TemporaryDirectory(prefix="openkit-app-update-") as tmp:
@@ -3206,6 +3247,266 @@ def _init_annotated_release_repo(repo: Path, tag: str) -> Tuple[str, str]:
         ["git", "rev-parse", tag], cwd=repo, check=True, capture_output=True, text=True, env=env
     ).stdout.strip()
     return peeled, tag_object
+
+
+class GettingStartedBindingTests(unittest.TestCase):
+    class BridgeEffects(RecordingEffects):
+        def __init__(self) -> None:
+            super().__init__()
+            self.public_host = "127.0.0.1"
+
+        def _container_payload(self) -> dict:
+            payload = super()._container_payload()
+            payload["HostConfig"].update(
+                NetworkMode="bridge",
+                PortBindings={
+                    "8080/tcp": [{"HostIp": self.public_host, "HostPort": "18080"}],
+                    "18443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18443"}],
+                },
+            )
+            payload["NetworkSettings"] = {"Networks": {"bridge": {}}}
+            payload["Mounts"] = [
+                item for item in payload["Mounts"]
+                if item["Destination"] in (
+                    "/data/openkit", "/data/openkit.backups", APP_UPDATE_IDENTITY_DEST, APP_UPDATE_KNOWN_HOSTS_DEST
+                )
+            ] + [
+                {"Destination": "/run/openkit-secrets", "RW": False, "Source": str(self.root / "app-secrets"), "Type": "bind"},
+                {"Destination": "/run/openkit-enrollment", "RW": True, "Source": self.nanohost_dir, "Type": "bind"},
+            ]
+            payload["Config"]["Env"] = [
+                "OPENKIT_CORE_MODE=server",
+                "OPENKIT_BIND_HOST=127.0.0.1",
+                "OPENKIT_TLS_CERT_FILE=/run/openkit-secrets/native.crt",
+                "OPENKIT_TLS_KEY_FILE=/run/openkit-secrets/native.key",
+            ]
+            return payload
+
+    def prepare(self, module, root: Path, effects: RecordingEffects):
+        secrets = root / "app-secrets"
+        secrets.mkdir()
+        config_path = write_config(
+            root,
+            appSecretsDirectory=str(secrets),
+            appBaseUrl="http://127.0.0.1:18080",
+            webAssetsDir="/srv/web",
+            caddyfile="/etc/caddy/Caddyfile",
+            vaultKeyFile=str(secrets / "openkit-vault.key"),
+        )
+        shutil.rmtree(root / "web")
+        effects.bind(root)
+        code, result = invoke(
+            module,
+            {"expectedCurrentImageId": DIGEST, "op": "prepare", "source": RELEASE_SOURCE},
+            config_path,
+            effects=effects,
+        )
+        return config_path, code, result
+
+    def test_published_bridge_layout_updates_without_moving_secrets_or_web(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory(prefix="openkit-app-update-") as tmp:
+            root = Path(tmp)
+            effects = self.BridgeEffects()
+            config_path, code, prepared = self.prepare(module, root, effects)
+            self.assertEqual(code, 0, prepared)
+            self.assertEqual(prepared.get("stage"), "prepared", prepared)
+            request_id = prepared["requestId"]
+            invoke(module, {"op": "start", "requestId": request_id, "maintenanceConsent": True}, config_path, effects)
+            effects.status_probe = {"requestId": request_id}
+            _, result = invoke(module, {}, config_path, effects, extra_argv=["--apply", request_id], stdin_bytes=b"")
+            self.assertEqual(result["stage"], "succeeded", result)
+            self.assertIsNone(result["predicates"]["webAssets"])
+            self.assertTrue(result["predicates"]["nanohostReady"])
+            replacement = next(call for call in effects.calls if call[:3] == ["docker", "run", "--detach"])
+            self.assertEqual(replacement[replacement.index("--network") + 1], "bridge")
+            self.assertCountEqual(
+                [replacement[i + 1] for i, flag in enumerate(replacement) if flag == "--publish"],
+                ["127.0.0.1:18080:8080", "127.0.0.1:18443:18443"],
+            )
+            self.assertCountEqual(
+                [replacement[i + 1] for i, flag in enumerate(replacement) if flag == "--mount"],
+                [
+                    "type=bind,src=%s,dst=/data/openkit" % effects.data_root,
+                    "type=bind,src=%s.backups,dst=/data/openkit.backups" % effects.data_root,
+                    "type=bind,src=%s,dst=/run/openkit-secrets,readonly" % (root / "app-secrets"),
+                    "type=bind,src=%s,dst=/run/openkit-enrollment" % effects.nanohost_dir,
+                    "type=bind,src=%s,dst=%s,readonly" % (effects.ssh_identity, APP_UPDATE_IDENTITY_DEST),
+                    "type=bind,src=%s,dst=%s,readonly" % (effects.ssh_known_hosts, APP_UPDATE_KNOWN_HOSTS_DEST),
+                ],
+            )
+            self.assertIn("OPENKIT_TLS_CERT_FILE=/run/openkit-secrets/native.crt", replacement)
+            self.assertIn("OPENKIT_TLS_KEY_FILE=/run/openkit-secrets/native.key", replacement)
+            self.assertFalse(any(call[:2] in (["docker", "create"], ["docker", "cp"]) for call in effects.calls))
+
+    def test_bridge_rechecks_publication_before_interruption(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory(prefix="openkit-app-update-") as tmp:
+            effects = self.BridgeEffects()
+            config_path, code, prepared = self.prepare(module, Path(tmp), effects)
+            self.assertEqual(code, 0, prepared)
+            self.assertEqual(prepared.get("stage"), "prepared", prepared)
+            request_id = prepared["requestId"]
+            effects.public_host = "0.0.0.0"
+            _, result = invoke(module, {}, config_path, effects, extra_argv=["--apply", request_id], stdin_bytes=b"")
+            self.assertEqual(result["stage"], "failed", result)
+            self.assertIn("loopback", result["error"])
+            self.assertFalse(any(call[:2] in (["docker", "pull"], ["docker", "stop"]) for call in effects.calls))
+
+
+class GettingStartedConversionTests(unittest.TestCase):
+    BACKUP_ID = "drb_00000000-0000-72d0-89a7-67474a8170db"
+    ORIGINAL_ID = "1" * 64
+    REPLACEMENT_ID = "2" * 64
+    RETAINED = CONTAINER + "-before-update-helper"
+
+    class LegacyBridgeEffects(GettingStartedBindingTests.BridgeEffects):
+        def __init__(self, root: Path, copy_error: bool, corrupt_copy: bool, stop_timeout: bool, restart_exits: bool) -> None:
+            super().__init__()
+            self.bind(root)
+            self.copy_error = copy_error
+            self.corrupt_copy = corrupt_copy
+            self.stop_timeout = stop_timeout
+            self.restart_exits = restart_exits
+            self.names = {GettingStartedConversionTests.ORIGINAL_ID: CONTAINER}
+            self.old_backup = root / "layer-backup"
+            self.old_backup.write_bytes(b"existing backup bytes")
+            self.backup_copy = root / "data.backups" / GettingStartedConversionTests.BACKUP_ID / "data.txt"
+
+        def run(self, argv, timeout=None):
+            case = GettingStartedConversionTests
+            if argv[:2] == ["docker", "inspect"]:
+                self.calls.append(list(argv))
+                name = self.names.get(argv[-1], argv[-1])
+                container_id = next((key for key, value in self.names.items() if value == name), None)
+                if container_id is None:
+                    return 1, "", "missing container"
+                payload = self._container_payload()
+                payload.update(Id=container_id, Name="/" + name, Image=DIGEST)
+                payload["State"] = {"Running": name in self.running, "Health": {"Status": "healthy"}}
+                if container_id == case.ORIGINAL_ID:
+                    payload["Mounts"] = [mount for mount in payload["Mounts"] if mount["Destination"] in {
+                        "/data/openkit", "/run/openkit-secrets", "/run/openkit-enrollment",
+                    }]
+                    payload["HostConfig"]["NetworkMode"] = "default"
+                    payload["HostConfig"]["LogConfig"]["Config"] = {}
+                return 0, json.dumps(payload), ""
+            if argv[:2] == ["docker", "exec"]:
+                self.calls.append(list(argv))
+                backup = self.old_backup if case.ORIGINAL_ID in argv else self.backup_copy
+                return 0, hashlib.sha256(backup.read_bytes()).hexdigest(), ""
+            if argv[:3] == ["docker", "cp", "--archive"]:
+                self.calls.append(list(argv))
+                self.backup_copy.parent.mkdir()
+                if self.copy_error:
+                    self.backup_copy.write_bytes(b"partial")
+                    return 1, "", "copy failed"
+                self.backup_copy.write_bytes(b"damaged" if self.corrupt_copy else self.old_backup.read_bytes())
+                return 0, "", ""
+            if argv[:2] == ["docker", "create"]:
+                self.calls.append(list(argv))
+                self.names[case.REPLACEMENT_ID] = CONTAINER
+                self.containers.add(CONTAINER)
+                return 0, case.REPLACEMENT_ID + "\n", ""
+            if argv[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "rm"]):
+                rewritten = [*argv[:-1], self.names.get(argv[-1], argv[-1])]
+                if argv[:2] == ["docker", "start"] and argv[-1] == case.REPLACEMENT_ID:
+                    self.replaced = True
+                result = super().run(rewritten, timeout)
+                self.calls[-1] = list(argv)
+                if argv[-1] == case.ORIGINAL_ID and result[0] == 0:
+                    if argv[1] == "stop" and self.stop_timeout:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    if argv[1] == "start" and self.restart_exits:
+                        self.running.discard(self.names[case.ORIGINAL_ID])
+                if argv[:2] == ["docker", "rm"] and result[0] == 0:
+                    del self.names[argv[-1]]
+                return result
+            if argv[:2] == ["docker", "rename"]:
+                container_id = argv[2]
+                result = super().run([*argv[:2], self.names[container_id], argv[3]], timeout)
+                if result[0] == 0:
+                    self.names[container_id] = argv[3]
+                return result
+            return super().run(argv, timeout)
+
+    def convert(
+        self, module, root: Path, *, copy_error: bool = False, corrupt_copy: bool = False,
+        stop_timeout: bool = False, restart_exits: bool = False,
+    ):
+        effects = self.LegacyBridgeEffects(root, copy_error, corrupt_copy, stop_timeout, restart_exits)
+        config = write_config(
+            root,
+            appSecretsDirectory=str(root / "app-secrets"),
+            appBaseUrl="http://127.0.0.1:18080",
+            readyTimeoutSeconds=0,
+        )
+        stdout = io.StringIO()
+        with patch.object(module, "PRODUCTION_CONFIG_PATH", str(config)):
+            code = module.main(
+                argv=[str(HELPER_PATH), "--convert-getting-started", effects.ssh_identity, effects.ssh_known_hosts],
+                stdin=io.BytesIO(b""), stdout=stdout, effects=effects, now=lambda: 1_000_000.0,
+            )
+        return config, effects, code, json.loads(stdout.getvalue())
+
+    def test_converts_original_install_and_verifies_the_retained_backup(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, effects, code, result = self.convert(module, Path(tmp))
+            self.assertEqual(code, 0, result)
+            self.assertEqual(result, {"converted": True, "retainedContainer": self.RETAINED})
+            self.assertEqual(effects.names[self.ORIGINAL_ID], self.RETAINED)
+            self.assertEqual(effects.running, {CONTAINER})
+            self.assertEqual(effects.backup_copy.read_bytes(), effects.old_backup.read_bytes())
+            self.assertFalse(any(call[:2] in (["docker", "pull"], ["docker", "rm"]) for call in effects.calls))
+            self.assertEqual(len([call for call in effects.calls if call[:2] == ["docker", "exec"]]), 2)
+            _, prepared = invoke(module, {"expectedCurrentImageId": DIGEST, "op": "prepare", "source": RELEASE_SOURCE}, config, effects)
+            self.assertEqual(prepared.get("stage"), "prepared", prepared)
+
+    def test_copy_failure_restarts_the_original_and_clears_the_partial_copy(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            _config, effects, code, result = self.convert(module, Path(tmp), copy_error=True)
+            self.assertEqual(code, 1, result)
+            self.assertIn("Original App restarted", result["error"]["message"])
+            self.assertEqual(effects.names, {self.ORIGINAL_ID: CONTAINER})
+            self.assertEqual(effects.running, {CONTAINER})
+            self.assertEqual(effects.old_backup.read_bytes(), b"existing backup bytes")
+            self.assertFalse(effects.backup_copy.parent.parent.exists())
+            self.assertFalse(any(call[:2] == ["docker", "create"] for call in effects.calls))
+
+    def test_copy_verification_failure_restarts_the_original(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            _config, effects, code, result = self.convert(module, Path(tmp), corrupt_copy=True)
+            self.assertEqual(code, 1, result)
+            self.assertIn("backup inventory differs", result["error"]["message"])
+            self.assertEqual(effects.names, {self.ORIGINAL_ID: CONTAINER})
+            self.assertEqual(effects.running, {CONTAINER})
+            self.assertEqual(effects.old_backup.read_bytes(), b"existing backup bytes")
+
+    def test_stop_timeout_after_daemon_stops_app_restores_original_by_id(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            _config, effects, code, result = self.convert(module, Path(tmp), stop_timeout=True)
+            self.assertEqual(code, 1, result)
+            self.assertEqual(effects.running, {CONTAINER})
+            self.assertEqual(result["error"]["code"], "app_update_unavailable")
+            self.assertIn("Original App restarted", result["error"]["message"])
+            self.assertIn(["docker", "start", self.ORIGINAL_ID], effects.calls)
+            self.assertFalse(any(call[:2] in (["docker", "cp"], ["docker", "create"]) for call in effects.calls))
+            self.assertEqual(effects.old_backup.read_bytes(), b"existing backup bytes")
+
+    def test_copy_failure_preserves_backups_when_original_exits_after_start(self) -> None:
+        module = load_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            _config, effects, code, result = self.convert(module, Path(tmp), copy_error=True, restart_exits=True)
+            self.assertEqual(code, 1, result)
+            self.assertEqual(result["error"]["code"], "app_update_recovery_required")
+            self.assertEqual(effects.names, {self.ORIGINAL_ID: CONTAINER})
+            self.assertEqual(effects.running, set())
+            self.assertEqual(effects.old_backup.read_bytes(), b"existing backup bytes")
+            self.assertEqual(effects.backup_copy.read_bytes(), b"partial")
 
 
 class PrepareBindingEligibilityTests(unittest.TestCase):
