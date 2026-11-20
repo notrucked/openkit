@@ -1,0 +1,8 @@
+{
+  "previousAppImageId": "sha256:dfa390c7aaf458c6f9e4a4b1939338ebd159456ba239f8d7642e5450370ee211",
+  "migrationFree": true,
+  "configurationCompatible": true,
+  "retainedDataCompatible": true,
+  "recovery": "previous-image-compatible",
+  "provenance": "train-scratch-after-red-assessment"
+}
